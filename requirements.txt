@@ -6,3 +6,5 @@ qiskit-aer
 psycopg[binary]
 dimod
 dwave-samplers
+qiskit-machine-learning
+torch
