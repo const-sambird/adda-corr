@@ -1,4 +1,5 @@
 import psycopg
+from concurrent.futures import ThreadPoolExecutor
 
 class CostEstimator:
     def __init__(self, replicas, candidates, workload, templates, n_templates):
@@ -10,6 +11,7 @@ class CostEstimator:
         self.n_templates = n_templates
         self.baseline = []
         self._cache = {}
+        self.n_workers = 4
     
     def get_benefits(self):
         baseline = [0 for _ in range(self.n_templates)]
@@ -58,20 +60,19 @@ class CostEstimator:
 
     def _statement_cost(self, cur, statement):
         statement = statement.lower()
-        if 'create view' in statement or 'drop view' in statement:
+        if 'create view' in statement:
+            # temp views are session-local, so concurrent workers can't collide (see below)
+            cur.execute(statement.replace('create view', 'create temp view', 1))
+        elif 'drop view' in statement:
             cur.execute(statement)
         elif any(k in statement for k in ('select', 'update', 'insert', 'delete')):
             cur.execute('EXPLAIN (FORMAT JSON) %s' % statement)
             return float(cur.fetchone()[0][0]['Plan']['Total Cost'])
         return 0.0
 
-    def get_template_costs(self, configuration):
-        """Per-template what-if cost with the candidate indices in `configuration` present."""
-        key = frozenset(configuration)
-        if key in self._cache:
-            return self._cache[key]
+    def _compute_template_costs(self, key):
         costs = [0.0] * self.n_templates
-        with psycopg.connect(self.replica.connection_string) as conn:
+        with psycopg.connect(self.replica.connection_string) as conn:   # one connection per task
             with conn.cursor() as cur:
                 for i in key:
                     cur.execute('SELECT indexrelid FROM hypopg_create_index($$%s$$);'
@@ -80,8 +81,17 @@ class CostEstimator:
                     for statement in query.split(';'):
                         costs[self.templates[idx]] += self._statement_cost(cur, statement)
                 cur.execute('SELECT hypopg_reset();')
-        self._cache[key] = costs
         return costs
+
+    def get_template_costs_batch(self, configurations):
+        """configurations: iterable of iterables of candidate indices -> {frozenset: per-template costs}"""
+        keys = list({frozenset(c) for c in configurations})
+        todo = [k for k in keys if k not in self._cache]
+        if todo:
+            with ThreadPoolExecutor(max_workers=self.n_workers) as pool:
+                for key, costs in zip(todo, pool.map(self._compute_template_costs, todo)):
+                    self._cache[key] = costs        # written from the main thread only, so no lock
+        return {k: self._cache[k] for k in keys}
 
     def get_storage_costs(self):
         costs = [0 for _ in range(self.n_candidates)]

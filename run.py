@@ -261,18 +261,26 @@ def optimise(args):
 
         n_c = len(candidates)
 
-        # 1. true costs of what the annealer proposed; track the incumbent by TRUE objective
-        for read in itertools.islice(reads.data(sorted_by='energy'), args.train_reads):
+        def cfg_of(read, r):
+            return tuple(int(read.sample[f'x-i{k}-r{r}']) for k in range(n_c))
+
+        top_reads = list(itertools.islice(reads.data(sorted_by='energy'), args.train_reads))
+        new = {cfg_of(rd, r) for rd in top_reads for r in range(n_replicas)} - dataset.keys()
+        true = estimator.get_template_costs_batch(
+            [[k for k, b in enumerate(c) if b] for c in new])
+        for c in new:
+            key = frozenset(k for k, b in enumerate(c) if b)
+            dataset[c] = [v / f for v in true[key]]
+
+        iter_best = float('inf')
+        for read in top_reads:
             loads = []
             for r in range(n_replicas):
-                cfg = tuple(int(read.sample[f'x-i{k}-r{r}']) for k in range(n_c))
-                if cfg not in dataset:
-                    true = estimator.get_template_costs([k for k, b in enumerate(cfg) if b])
-                    dataset[cfg] = [c / f for c in true]
-                y_cfg = dataset[cfg]
+                y_cfg = dataset[cfg_of(read, r)]
                 loads.append(sum(y_cfg[q] for q in queries if read.sample[f't-q{q}-r{r}'] == 1)
                              + sum(y_cfg[u] for u in updates))
             obj = max(loads) if args.basis == 'max' else sum(loads)
+            iter_best = min(iter_best, obj)
             if obj < best_true:
                 best_true, best_read = obj, read
         print(f'iter {iter}: best true objective {best_true:.2f} ({len(dataset)} unique configs)')
