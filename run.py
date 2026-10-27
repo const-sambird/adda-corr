@@ -122,6 +122,10 @@ def create_arguments():
     parser.add_argument('--log', type=str, help='where to write the recommendations')
     parser.add_argument('--train-reads', type=int, default=20)
     parser.add_argument('--hidden', type=int, nargs='+', default=None, help='hidden layers in NN')
+    parser.add_argument('--model', choices=['mlp', 'qnn', 'qnn-classical'], default='mlp')
+    parser.add_argument('--qubits', type=int, default=4)
+    parser.add_argument('--reps', type=int, default=2)
+    parser.add_argument('--epochs', type=int, default=2000)
     parser.add_argument('basis', type=str, choices=['total', 'max'],
                         help='cost basis for objective function')
 
@@ -165,8 +169,15 @@ def optimise(args):
 
     raw_benefits = copy.deepcopy(benefits)
     f = args.benefit_normalisation_factor
-    model = CorrectionNetwork([[b / f for b in row] for row in benefits],
-                              [c / f for c in baseline], hidden=args.hidden)
+    norm_benefits = [[b / f for b in row] for row in benefits]
+    norm_baseline = [c / f for c in baseline]
+    if args.model == 'mlp':
+        model = CorrectionNetwork(norm_benefits, norm_baseline, hidden=args.hidden)
+    else:
+        from quantum_network import QuantumCorrectionNetwork
+        model = QuantumCorrectionNetwork(norm_benefits, norm_baseline,
+                                         n_qubits=args.qubits, reps=args.reps,
+                                         hidden=args.hidden, quantum=(args.model == 'qnn'))
     criterion = torch.nn.MSELoss()
     nn_opt = torch.optim.Adam(model.parameters(), lr=1e-2, weight_decay=1e-4)
     dataset = {}                                  # config tuple -> true per-template costs
@@ -185,7 +196,7 @@ def optimise(args):
     # Using sum(baseline) is conservative (all queries on one replica, no indexes).
     Z_max = omega(queries, updates, [i for i in range(len(candidates))], baseline, [1 for _ in range(n_templates)], n_replicas)
 
-    for iter in range(args.iterations):
+    for iter in range(args.iterations + 1):
 
         print('- baseline:', baseline)
         print('- benefits:', benefits)
@@ -288,11 +299,11 @@ def optimise(args):
         # 2. fit the correction (x, y are built ONCE, outside the epoch loop)
         x = torch.tensor(list(dataset.keys()), dtype=torch.float32)
         y = torch.tensor(list(dataset.values()), dtype=torch.float32)
-        for t in range(2000):
+        for t in range(args.epochs):
             y_pred = model(x)
             loss = criterion(y_pred, y)
-            if t % 100 == 99:
-                print('iter     ', iter, '     epoch   ', t, '     loss    ', loss.item())
+            #if t % 100 == 99:
+            print('iter     ', iter, '     epoch   ', t, '     loss    ', loss.item())
             nn_opt.zero_grad()
             loss.backward()
             nn_opt.step()
