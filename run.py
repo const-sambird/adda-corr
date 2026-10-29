@@ -296,25 +296,26 @@ def optimise(args):
                 best_true, best_read = obj, read
         print(f'iter {iter}: best true objective {best_true:.2f} ({len(dataset)} unique configs)')
 
-        # 2. fit the correction (x, y are built ONCE, outside the epoch loop)
-        x = torch.tensor(list(dataset.keys()), dtype=torch.float32)
-        y = torch.tensor(list(dataset.values()), dtype=torch.float32)
-        for t in range(args.epochs):
-            y_pred = model(x)
-            loss = criterion(y_pred, y)
-            #if t % 100 == 99:
-            print('iter     ', iter, '     epoch   ', t, '     loss    ', loss.item())
-            nn_opt.zero_grad()
-            loss.backward()
-            nn_opt.step()
+        if iter < args.iterations: # don't update gamma if we're not going to use it again
+            # 2. fit the correction (x, y are built ONCE, outside the epoch loop)
+            x = torch.tensor(list(dataset.keys()), dtype=torch.float32)
+            y = torch.tensor(list(dataset.values()), dtype=torch.float32)
+            for t in range(args.epochs):
+                y_pred = model(x)
+                loss = criterion(y_pred, y)
+                #if t % 100 == 99:
+                print('iter     ', iter, '     epoch   ', t, '     loss    ', loss.item())
+                nn_opt.zero_grad()
+                loss.backward()
+                nn_opt.step()
 
-        # 3. write gamma back into the QUBO coefficients, always from the ORIGINAL benefits
-        with torch.no_grad():
-            ref = torch.tensor([[int(best_read.sample[f'x-i{k}-r{r}']) for k in range(n_c)]
-                                for r in range(n_replicas)], dtype=torch.float32)
-            gamma = model.gamma(ref).mean(dim=0)              # (n_cand, n_tmpl)
-        benefits = [[round(gamma[k, q].item() * raw_benefits[k][q] / f)
-                     for q in range(n_templates)] for k in range(n_c)]
+            # 3. write gamma back into the QUBO coefficients, always from the ORIGINAL benefits
+            with torch.no_grad():
+                ref = torch.tensor([[int(best_read.sample[f'x-i{k}-r{r}']) for k in range(n_c)]
+                                    for r in range(n_replicas)], dtype=torch.float32)
+                gamma = model.gamma(ref).mean(dim=0)              # (n_cand, n_tmpl)
+            benefits = [[round(gamma[k, q].item() * raw_benefits[k][q] / f)
+                        for q in range(n_templates)] for k in range(n_c)]
 
     result = best_read
     if args.qaoa:
